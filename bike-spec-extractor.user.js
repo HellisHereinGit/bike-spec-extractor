@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ficha de Bicicletas (Trek + adaptadores)
 // @namespace    https://vadebicis.local/bike-spec-extractor
-// @version      1.9.1
+// @version      1.9.2
 // @description  Extrae la ficha técnica y las fotos de una página de producto de bicicleta y la exporta a PDF y Word. Funciona en trekbikes.com y está preparado para añadir más marcas (Orbea, Mondraker...) mediante adaptadores.
 // @author       Vadebicis
 // @match        https://www.trekbikes.com/*
@@ -80,7 +80,7 @@
   // versión en caché tras editar el script). Súbelo cada vez que actualices
   // el fichero: si tras guardar y recargar la web ves el build ANTIGUO en la
   // consola, el problema es de caché del navegador/Tampermonkey, no del código.
-  const BUILD = 'v1.9.1 · 2026-07-23 · maximo-6-fotos';
+  const BUILD = 'v1.9.2 · 2026-10-05 · orbea-filtro-myo';
   console.log('%c[FichaBici] BUILD ' + BUILD, 'color:#b0281f;font-weight:bold;');
 
   // --------------------------------------------------------------------------
@@ -764,9 +764,35 @@
       extract: async () => {
         const data = await genericExtract();
         data.brand = data.brand || 'Orbea';
-        // TODO: cuando se pruebe contra orbea.com de verdad, afinar aquí
-        // selectores específicos si el extractor genérico se queda corto
-        // (por ejemplo su configurador de bici por talla/color).
+
+        // Orbea monta en la página un personalizador de pintura oculto
+        // ("MYO Custom": muestras de color y fotos de inspiración) cuyas
+        // imágenes el rastreador genérico confunde con fotos de la bici.
+        // Aquí las descartamos y priorizamos og:image / JSON-LD, y luego las
+        // imágenes grandes visibles fuera de esos bloques.
+        const NOISE_RE = /myo|custom|paint|swatch|inspiration|configurator|colou?r-?(picker|option|chip)|thumbnail-color|logo|icon|sprite/i;
+        const isNoise = (img, url) => {
+          if (NOISE_RE.test(url) || NOISE_RE.test(img.alt || '')) return true;
+          for (let el = img; el && el !== document.body; el = el.parentElement) {
+            if (NOISE_RE.test(String(el.className || '')) || NOISE_RE.test(el.id || '')) return true;
+          }
+          return false;
+        };
+        const clean = [];
+        const push = (url, alt) => {
+          if (!url) return;
+          const u = absUrl(url);
+          if (u && !NOISE_RE.test(u) && !clean.some((x) => x.url === u)) clean.push({ url: u, alt: alt || data.model || '' });
+        };
+        const og = document.querySelector('meta[property="og:image"]');
+        if (og) push(og.getAttribute('content'));
+        document.querySelectorAll('img').forEach((img) => {
+          const url = bestSrcFromImg(img);
+          if (!url || looksLikeIcon(url, img) || isNoise(img, url)) return;
+          const r = img.getBoundingClientRect();
+          if (img.naturalWidth >= 400 || r.width >= 400) push(url, img.alt);
+        });
+        if (clean.length) data.images = clean.slice(0, 6);
         return data;
       },
     },
