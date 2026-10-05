@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ficha de Bicicletas (Trek + adaptadores)
 // @namespace    https://vadebicis.local/bike-spec-extractor
-// @version      1.9.7
+// @version      1.9.9
 // @description  Extrae la ficha técnica y las fotos de una página de producto de bicicleta y la exporta a PDF y Word. Funciona en trekbikes.com y está preparado para añadir más marcas (Orbea, Mondraker...) mediante adaptadores.
 // @author       Vadebicis
 // @match        https://www.trekbikes.com/*
@@ -80,7 +80,7 @@
   // versión en caché tras editar el script). Súbelo cada vez que actualices
   // el fichero: si tras guardar y recargar la web ves el build ANTIGUO en la
   // consola, el problema es de caché del navegador/Tampermonkey, no del código.
-  const BUILD = 'v1.9.7 · 2026-10-05 · orbea-color-talla-elegidos';
+  const BUILD = 'v1.9.9 · 2026-10-05 · orbea-precio-miles';
   console.log('%c[FichaBici] BUILD ' + BUILD, 'color:#b0281f;font-weight:bold;');
 
   // --------------------------------------------------------------------------
@@ -883,6 +883,26 @@
           clean.filter((c) => !bikePhotos.some((b) => b.url === c.url) && !(bikePhotos.length && BIKE_RE.test(c.url)))
         );
         if (finalImages.length) data.images = finalImages.slice(0, 6);
+
+        // Precio: Orbea lo pinta con Alpine en <span x-text="window.formatCurrency(price, currency)">
+        // (el total de la bici configurada, fuera de la lista de componentes).
+        // Si hay un precio anterior/tachado (oferta), ese es el PVP y el
+        // actual es el precio de oferta.
+        try {
+          const priceEls = Array.from(document.querySelectorAll('[x-text*="formatCurrency"]'))
+            .filter((el) => !el.closest('#components-base, #sidebar-components, .swiper'))
+            .map((el) => ({
+              el,
+              expr: el.getAttribute('x-text') || '',
+              text: (el.textContent || '').replace(/\s+/g, ' ').trim(),
+            }))
+            .filter((x) => /\d/.test(x.text));
+          // Orbea solo muestra el PVP; el "precio de oferta" lo calcula la
+          // ficha con el descuento que se elige en el menú del extractor.
+          if (priceEls.length) data.price = priceEls[0].text;
+        } catch (e) {
+          log('No se pudo leer el precio de Orbea', e);
+        }
         return data;
       },
     },
@@ -1258,7 +1278,8 @@
     let numStr = match[1];
     if (numStr.includes(',')) {
       numStr = numStr.replace(/\./g, '').replace(',', '.');
-    } else if ((numStr.match(/\./g) || []).length > 1) {
+    } else if (/^\d{1,3}(\.\d{3})+$/.test(numStr)) {
+      // "4.999" o "1.234.567": el punto es separador de miles, no decimal.
       numStr = numStr.replace(/\./g, '');
     }
     const n = parseFloat(numStr);
