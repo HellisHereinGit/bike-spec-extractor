@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ficha de Bicicletas (Trek + adaptadores)
 // @namespace    https://vadebicis.local/bike-spec-extractor
-// @version      1.9.2
+// @version      1.9.7
 // @description  Extrae la ficha técnica y las fotos de una página de producto de bicicleta y la exporta a PDF y Word. Funciona en trekbikes.com y está preparado para añadir más marcas (Orbea, Mondraker...) mediante adaptadores.
 // @author       Vadebicis
 // @match        https://www.trekbikes.com/*
@@ -80,7 +80,7 @@
   // versión en caché tras editar el script). Súbelo cada vez que actualices
   // el fichero: si tras guardar y recargar la web ves el build ANTIGUO en la
   // consola, el problema es de caché del navegador/Tampermonkey, no del código.
-  const BUILD = 'v1.9.2 · 2026-10-05 · orbea-filtro-myo';
+  const BUILD = 'v1.9.7 · 2026-10-05 · orbea-color-talla-elegidos';
   console.log('%c[FichaBici] BUILD ' + BUILD, 'color:#b0281f;font-weight:bold;');
 
   // --------------------------------------------------------------------------
@@ -770,7 +770,7 @@
         // imágenes el rastreador genérico confunde con fotos de la bici.
         // Aquí las descartamos y priorizamos og:image / JSON-LD, y luego las
         // imágenes grandes visibles fuera de esos bloques.
-        const NOISE_RE = /myo|custom|paint|swatch|inspiration|configurator|colou?r-?(picker|option|chip)|thumbnail-color|logo|icon|sprite/i;
+        const NOISE_RE = /myo|custom|paint|swatch|inspiration|configurator|colou?r-?(picker|option|chip)|thumbnail-color|logo|icon|sprite|\/uploads\/(components|frames|microsites)\//i;
         const isNoise = (img, url) => {
           if (NOISE_RE.test(url) || NOISE_RE.test(img.alt || '')) return true;
           for (let el = img; el && el !== document.body; el = el.parentElement) {
@@ -792,7 +792,97 @@
           const r = img.getBoundingClientRect();
           if (img.naturalWidth >= 400 || r.width >= 400) push(url, img.alt);
         });
-        if (clean.length) data.images = clean.slice(0, 6);
+        // Las fotos de la bici viven en /uploads/products/images/ con nombre
+        // MODELO-COLOR-VISTA-NOMBRE.ext (vistas SIDE/FRONT/BACK). El visor
+        // solo carga una; deducimos las otras y comprobamos que existen.
+        const urlExists = (url) =>
+          new Promise((resolve) => {
+            try {
+              GM_xmlhttpRequest({
+                method: 'HEAD',
+                url,
+                timeout: 8000,
+                onload: (r) => resolve(r.status >= 200 && r.status < 300),
+                onerror: () => resolve(false),
+                ontimeout: () => resolve(false),
+              });
+            } catch (e) {
+              resolve(false);
+            }
+          });
+        const pool = [
+          ...(og ? [og.getAttribute('content')] : []),
+          ...Array.from(document.images).map((i) => i.currentSrc || i.src),
+          ...performance.getEntriesByType('resource').map((r) => r.name),
+        ];
+        const BIKE_RE = /^(https?:\/\/[^?#]*\/uploads\/products\/images\/)([A-Z0-9]+)-([A-Z0-9]+)-(SIDE|FRONT|BACK)-([^/?#]+?)\.(webp|jpe?g|png)(\?[^#]*)?$/i;
+        const base = pool.map((u) => (u || '').match(BIKE_RE)).find(Boolean);
+        let bikePhotos = [];
+
+        // Visor del configurador: cada vista (side/front/back) se compone en
+        // el navegador superponiendo capas transparentes:
+        //   /custom/{id}/{vista}/base/{talla}/base.webp  (componentes)
+        //   /custom/{id}/{vista}/C1/{talla}/C1-{COLOR}.webp (pintura del cuadro)
+        // Las descargamos y las componemos nosotros sobre fondo blanco.
+        try {
+          const LAYER_RE = /^(https?:\/\/[^?#]*\/custom\/[^/]+)\/(side|front|back)\/([^/]+)\/([^/]+)\/([^/?#]+)\.webp(\?[^#]*)?$/i;
+          const checked = document.querySelector('input[name="C1"]:checked');
+          // El color/talla elegidos ahora mandan sobre el ?color= de la URL,
+          // que solo refleja el color con el que se abrió la página.
+          const color = ((checked && checked.value) || new URLSearchParams(location.search).get('color') || '').toUpperCase();
+          const sizeInput = document.querySelector('input[name="size"]:checked');
+          const sizeLabel = ((sizeInput && sizeInput.dataset.label) || '').toUpperCase();
+          const layerUrls = Array.from(new Set(performance.getEntriesByType('resource').map((r) => r.name))).map((u) => ({ u, m: u.match(LAYER_RE) })).filter((x) => x.m);
+          for (const view of ['side', 'front', 'back']) {
+            let inView = layerUrls.filter((x) => x.m[2].toLowerCase() === view);
+            // Talla: la elegida si hay capas de ella; si no, la de la última
+            // capa base cargada (la más reciente).
+            const bases = inView.filter((x) => x.m[3].toLowerCase() === 'base');
+            const pickedSize = bases.some((x) => x.m[4].toUpperCase() === sizeLabel)
+              ? sizeLabel
+              : bases.length
+              ? bases[bases.length - 1].m[4].toUpperCase()
+              : '';
+            if (pickedSize) inView = inView.filter((x) => x.m[4].toUpperCase() === pickedSize);
+            const baseLayer = inView.find((x) => x.m[3].toLowerCase() === 'base');
+            const paint = inView.filter((x) => x.m[3].toLowerCase() !== 'base' && (!color || x.m[5].toUpperCase().endsWith('-' + color)));
+            if (!baseLayer) continue;
+            const urls = [baseLayer.u, ...paint.map((x) => x.u)];
+            const bitmaps = await Promise.all(urls.map(async (u) => createImageBitmap(new Blob([await fetchArrayBuffer(u)]))));
+            const cv = document.createElement('canvas');
+            cv.width = bitmaps[0].width;
+            cv.height = bitmaps[0].height;
+            const cx = cv.getContext('2d');
+            cx.fillStyle = '#ffffff';
+            cx.fillRect(0, 0, cv.width, cv.height);
+            bitmaps.forEach((b) => cx.drawImage(b, 0, 0, cv.width, cv.height));
+            bikePhotos.push({ url: cv.toDataURL('image/jpeg', 0.9), alt: `${data.model || ''} ${view}`.trim() });
+          }
+        } catch (e) {
+          log('No se pudieron componer las capas de Orbea', e);
+          bikePhotos = [];
+        }
+
+        if (!bikePhotos.length && base) {
+          const [, dir, modelCode, fileColor, , rest, ext, query] = base;
+          const urlColor = new URLSearchParams(location.search).get('color');
+          const colors = Array.from(new Set([urlColor, fileColor].filter(Boolean)));
+          for (const view of ['SIDE', 'FRONT', 'BACK']) {
+            for (const color of colors) {
+              const url = `${dir}${modelCode}-${color}-${view}-${rest}.${ext}${query || ''}`;
+              if (await urlExists(url)) {
+                bikePhotos.push({ url, alt: `${data.model || ''} ${view.toLowerCase()}`.trim() });
+                break;
+              }
+            }
+          }
+        }
+        // Si ya tenemos fotos de bici deducidas, descartamos otras imágenes de
+        // producto (p. ej. la misma vista en otro color que precarga la web).
+        const finalImages = bikePhotos.concat(
+          clean.filter((c) => !bikePhotos.some((b) => b.url === c.url) && !(bikePhotos.length && BIKE_RE.test(c.url)))
+        );
+        if (finalImages.length) data.images = finalImages.slice(0, 6);
         return data;
       },
     },
@@ -1019,6 +1109,8 @@
   // --------------------------------------------------------------------------
 
   function fetchArrayBuffer(url) {
+    // Imágenes ya generadas por el propio script (data:) no necesitan red.
+    if (/^data:/i.test(url)) return fetch(url).then((r) => r.arrayBuffer());
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: 'GET',
